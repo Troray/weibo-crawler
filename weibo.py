@@ -3822,14 +3822,31 @@ def handle_config_renaming(config, oldName, newName):
         del config[oldName]
 
 def get_config():
-    """获取配置文件信息（支持JSON5格式）"""
-    config_path = os.path.split(os.path.realpath(__file__))[0] + os.sep + "config.json"
+    """获取配置文件信息（支持JSON5格式）
+
+    配置文件优先级：
+    1. config.json（用户已从 config.json.example 复制并重命名）
+    2. config.json.example（版本控制中的默认配置模板）
+    """
+    base_dir = os.path.split(os.path.realpath(__file__))[0] + os.sep
+    config_path = base_dir + "config.json"
+    example_path = base_dir + "config.json.example"
+
+    # 优先使用 config.json，若不存在则使用 config.json.example
     if not os.path.isfile(config_path):
-        logger.warning(
-            "当前路径：%s 不存在配置文件config.json",
-            (os.path.split(os.path.realpath(__file__))[0] + os.sep),
-        )
-        sys.exit()
+        if os.path.isfile(example_path):
+            logger.warning(
+                "未找到 config.json。正在使用 config.json.example（模板配置）。\n"
+                "建议将 config.json.example 复制为 config.json 并填写自己的 Cookie 等配置：\n"
+                "  cp config.json.example config.json"
+            )
+            config_path = example_path
+        else:
+            logger.warning(
+                "当前路径：%s 不存在配置文件 config.json 和 config.json.example",
+                base_dir,
+            )
+            sys.exit()
     try:
         with open(config_path, encoding="utf-8") as f:
             config_content = f.read()
