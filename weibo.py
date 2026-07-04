@@ -89,6 +89,7 @@ class Weibo(object):
             "write_mode"
         ]  # 结果信息保存类型，为list形式，可包含csv、mongo和mysql三种类型
         self.markdown_split_by = config.get("markdown_split_by", "day") # markdown文件分割方式，day/day_by_month/month/year/all
+        self.markdown_sort_order = config.get("markdown_sort_order", "new_to_old") # markdown中微博排序方式，new_to_old/old_to_new
         self.markdown_image_order = config.get("markdown_image_order", "live_photo_first") # markdown中图片与Live Photo的排列顺序，live_photo_first/image_first_interleaved
         # markdown 媒体预览配置，默认值
         default_preview = {
@@ -166,6 +167,8 @@ class Weibo(object):
         self.output_directory = config.get(
             "output_directory", "weibo"
         )  # 输出目录配置，默认为"weibo"
+
+        self.missing_weibo_report = config.get("missing_weibo_report", 0)  # 是否生成缺失微博报告
         
         # Cookie支持：优先使用环境变量WEIBO_COOKIE，其次使用config.json中的配置
         cookie_config = config.get("cookie")
@@ -496,6 +499,7 @@ class Weibo(object):
             "retweet_live_photo_download",
             "download_comment",
             "download_repost",
+            "missing_weibo_report",
         ]
         for argument in argument_list:
             # 使用 get() 获取值，新增字段默认为0
@@ -535,6 +539,12 @@ class Weibo(object):
         markdown_image_order = config.get("markdown_image_order", "live_photo_first")
         if markdown_image_order not in ["live_photo_first", "image_first_interleaved"]:
             logger.warning("markdown_image_order值应为live_photo_first或image_first_interleaved,请重新输入")
+            sys.exit()
+
+        # 验证markdown_sort_order
+        markdown_sort_order = config.get("markdown_sort_order", "new_to_old")
+        if markdown_sort_order not in ["new_to_old", "old_to_new"]:
+            logger.warning("markdown_sort_order值应为new_to_old或old_to_new,请重新输入")
             sys.exit()
 
         # 验证markdown_preview
@@ -3121,7 +3131,100 @@ class Weibo(object):
                 logger.warning(f"无法解析微博日期: {created_at}")
                 continue
 
+        # 每个分组内按 markdown_sort_order 排序
+        descending = self.markdown_sort_order != "old_to_new"
+        for key in weibo_by_group:
+            weibo_by_group[key].sort(key=lambda w: int(w.get("id", 0)), reverse=descending)
+
         return weibo_by_group
+
+    def generate_missing_weibo_report(self):
+        """生成缺失微博报告
+
+        比较本次爬取到的微博ID与markdown文件中已有的微博ID，
+        列出在md中存在但本次未爬取到的微博（可能已被删除或漏爬）。
+        报告按user_id区分，以结束爬取时间为suffix命名。
+        """
+        if not self.missing_weibo_report:
+            return
+
+        # 确保self.user已初始化
+        if not self.user or not self.user_config:
+            return
+
+        # 收集本次爬取到的微博ID（直接从self.weibo中获取）
+        crawled_ids = set()
+        for w in self.weibo:
+            weibo_id = w.get("id")
+            if weibo_id:
+                crawled_ids.add(int(weibo_id))
+
+        if not crawled_ids:
+            return
+
+        # 收集所有md文件中已有的微博ID
+        file_dir = self.get_filepath("markdown")
+        existing_ids = set()
+        try:
+            md_files = self._find_md_files(file_dir)
+            for md_path in md_files:
+                with open(md_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+                    ids = re.findall(r"<!-- weibo_id: (\d+) -->", content)
+                    existing_ids.update(int(i) for i in ids)
+        except Exception as e:
+            logger.warning(f"读取md文件收集已有微博ID失败: {e}")
+            return
+
+        # 找出缺失的微博（md中有但本次没爬到）
+        missing_ids = existing_ids - crawled_ids
+        if not missing_ids:
+            logger.info("本次爬取无缺失微博，所有已有微博均已再次爬取到")
+            return
+
+        # 构建输出目录和文件路径
+        base_dir = os.path.split(os.path.realpath(__file__))[0] + os.sep + self.output_directory
+        user_screen_name = self.user.get("screen_name", self.user_config.get("user_id", "unknown"))
+        user_id = self.user_config.get("user_id", "unknown")
+        end_time = datetime.now().strftime("%Y%m%d_%H%M%S")
+        report_filename = f"missing_weibo_{user_id}_{user_screen_name}_{end_time}.txt"
+        report_path = os.path.join(base_dir, report_filename)
+
+        try:
+            if not os.path.isdir(base_dir):
+                os.makedirs(base_dir)
+            with open(report_path, "w", encoding="utf-8") as f:
+                f.write(f"缺失微博报告\n")
+                f.write(f"用户: {user_screen_name} (ID: {user_id})\n")
+                f.write(f"生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write(f"md中已有微博数: {len(existing_ids)}\n")
+                f.write(f"本次爬取到微博数: {len(crawled_ids)}\n")
+                f.write(f"缺失（已删除/未爬到）微博数: {len(missing_ids)}\n")
+                f.write("=" * 60 + "\n")
+                f.write("以下微博ID在md文件中存在，但本次未爬取到（可能已被删除）：\n\n")
+                for mid in sorted(missing_ids, reverse=True):
+                    f.write(f"  https://m.weibo.cn/detail/{mid}\n")
+                f.write("\n")
+                f.write("=" * 60 + "\n")
+                f.write(f"报告完毕。\n")
+            logger.info(
+                f"缺失微博报告已生成: {report_path} "
+                f"({user_screen_name}: {len(missing_ids)} 条缺失)"
+            )
+        except Exception as e:
+            logger.error(f"生成缺失微博报告失败: {e}")
+
+    @staticmethod
+    def _find_md_files(dir_path):
+        """递归查找目录下所有 .md 文件"""
+        md_files = []
+        if not os.path.isdir(dir_path):
+            return md_files
+        for root, dirs, files in os.walk(dir_path):
+            for f in files:
+                if f.endswith('.md'):
+                    md_files.append(os.path.join(root, f))
+        return md_files
 
     def download_markdown_images(self, wrote_count):
         """为Markdown格式下载图片，使用指定的命名规则"""
@@ -3152,7 +3255,7 @@ class Weibo(object):
                     self._download_weibo_images(w, img_dir, is_retweet=False)
 
                 # 处理转发微博图片（使用父微博的月份文件夹）
-                if not self.only_crawl_original and w.get("retweet"):
+                if not self.only_crawl_original and self.retweet_pic_download and w.get("retweet"):
                     retweet = w["retweet"]
                     if retweet.get("pics"):
                         # 转发微博的图片保存到父微博的月份文件夹中
@@ -3171,7 +3274,7 @@ class Weibo(object):
                     self._download_weibo_images(w, img_dir, is_retweet=False)
 
                 # 处理转发微博图片
-                if not self.only_crawl_original and w.get("retweet"):
+                if not self.only_crawl_original and self.retweet_pic_download and w.get("retweet"):
                     retweet = w["retweet"]
                     if retweet.get("pics"):
                         self._download_weibo_images(retweet, img_dir, is_retweet=True)
@@ -3400,6 +3503,10 @@ class Weibo(object):
         if not new_weibo_list:
             logger.info(f"分组 {group_key} 没有新微博需要写入")
             return
+
+        # 按 markdown_sort_order 排序
+        descending = self.markdown_sort_order != "old_to_new"
+        new_weibo_list.sort(key=lambda w: int(w.get("id", 0)), reverse=descending)
 
         # 构建新微博的markdown内容
         new_md_content = ""
@@ -3805,6 +3912,9 @@ class Weibo(object):
 
                 # 当前用户所有微博和评论抓取完毕后，再导出该用户的评论 CSV
                 self.export_comments_to_csv_for_current_user()
+
+                # 生成缺失微博报告
+                self.generate_missing_weibo_report()
 
                 logger.info("信息抓取完毕")
                 logger.info("*" * 100)
