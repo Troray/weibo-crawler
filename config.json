@@ -11,6 +11,7 @@
         "json"
     ], // 输出格式（可多选），可选项：csv, json, mysql, mongo, sqlite, post, markdown，示例：["markdown"] 或 ["markdown", "csv", "json"]
     "markdown_split_by": "day_by_month", // markdown文件分割方式，可选项：day（按天，平铺），day_by_month（按天，按月归档到子文件夹），month（按月），year（按年），all（所有数据在一个文件）
+    "markdown_image_order": "live_photo_first", // markdown中图片与Live Photo的排列顺序，可选项：live_photo_first（Live Photo排在图片前面），image_first_interleaved（图片优先，同名Live Photo插入到对应图片下方）
     "original_pic_download": 0, // 是否下载原创微博图片 0 = 不下载，1 = 下载
     "retweet_pic_download": 0, // 是否下载转发微博图片 0 = 不下载，1 = 下载
     "original_video_download": 0, // 是否下载原创微博视频 0 = 不下载，1 = 下载

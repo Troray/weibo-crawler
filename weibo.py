@@ -89,6 +89,7 @@ class Weibo(object):
             "write_mode"
         ]  # 结果信息保存类型，为list形式，可包含csv、mongo和mysql三种类型
         self.markdown_split_by = config.get("markdown_split_by", "day") # markdown文件分割方式，day/day_by_month/month/year/all
+        self.markdown_image_order = config.get("markdown_image_order", "live_photo_first") # markdown中图片与Live Photo的排列顺序，live_photo_first/image_first_interleaved
         self.original_pic_download = config[
             "original_pic_download"
         ]  # 取值范围为0、1, 0代表不下载原创微博图片,1代表下载
@@ -490,6 +491,12 @@ class Weibo(object):
         markdown_split_by = config.get("markdown_split_by", "day")
         if markdown_split_by not in ["day", "day_by_month", "month", "year", "all"]:
             logger.warning("markdown_split_by值应为day、day_by_month、month、year或all,请重新输入")
+            sys.exit()
+
+        # 验证markdown_image_order
+        markdown_image_order = config.get("markdown_image_order", "live_photo_first")
+        if markdown_image_order not in ["live_photo_first", "image_first_interleaved"]:
+            logger.warning("markdown_image_order值应为live_photo_first或image_first_interleaved,请重新输入")
             sys.exit()
 
         # 验证user_id_list
@@ -3179,6 +3186,54 @@ class Weibo(object):
 
         return "\n".join(quoted_lines)
 
+    def _render_media_items(self, image_filenames, image_prefix, live_photo_files,
+                            live_photo_prefix, live_photo_label_prefix, blockquote=False):
+        """根据 markdown_image_order 配置渲染图片和 Live Photo 的 Markdown 内容
+
+        live_photo_first: Live Photo 全部放前面，图片放后面（现有模式）
+        image_first_interleaved: 图片优先，同名 Live Photo 插入到对应图片下方
+        """
+        quote = "> " if blockquote else ""
+        lines = []
+
+        if self.markdown_image_order == "image_first_interleaved":
+            # 构建 Live Photo stem → (label, filename) 映射
+            # stem 如 2026-07-01_22-00-00_1.mov → 2026-07-01_22-00-00_1
+            lp_map = {}
+            for i, file_name in enumerate(live_photo_files):
+                stem = os.path.splitext(file_name)[0]
+                label = (live_photo_label_prefix if len(live_photo_files) == 1
+                         else f"{live_photo_label_prefix} {i + 1}")
+                lp_map[stem] = (label, file_name)
+
+            # 先输出图片，每张图片后紧跟同名 Live Photo
+            remaining_lp_stems = set(lp_map.keys())
+            for img_filename in image_filenames:
+                lines.append(f"{quote}![img](img/{img_filename})\n")
+                img_stem = os.path.splitext(img_filename)[0]
+                if img_stem in lp_map:
+                    label, lp_filename = lp_map[img_stem]
+                    # Live Photo 紧跟同名图片，不加空行
+                    lines.append(f"{quote}[{label}]({live_photo_prefix}{lp_filename})\n")
+                    remaining_lp_stems.discard(img_stem)
+                # 每条图片（及其可能跟随的 Live Photo）之后加一个空行
+                lines.append("\n")
+
+            # 输出未能匹配到任何图片的 Live Photo（异常情况兜底）
+            for stem in remaining_lp_stems:
+                label, lp_filename = lp_map[stem]
+                lines.append(f"{quote}[{label}]({live_photo_prefix}{lp_filename})\n\n")
+        else:
+            # live_photo_first: Live Photo 全部在前，图片在后（现有默认模式）
+            for i, file_name in enumerate(live_photo_files):
+                label = (live_photo_label_prefix if len(live_photo_files) == 1
+                         else f"{live_photo_label_prefix} {i + 1}")
+                lines.append(f"{quote}[{label}]({live_photo_prefix}{file_name})\n\n")
+            for img_filename in image_filenames:
+                lines.append(f"{quote}![img](img/{img_filename})\n\n")
+
+        return "".join(lines)
+
     def generate_markdown_file(self, group_key, weibo_list):
         """生成单个markdown文件（增量模式）"""
         # 获取用户目录
@@ -3287,12 +3342,10 @@ class Weibo(object):
                 live_photo_files = self.get_download_file_names(
                     "live_photo", w.get("live_photo_url", ""), w
                 )
-                for idx, file_name in enumerate(live_photo_files, start=1):
-                    label = "Live Photo" if len(live_photo_files) == 1 else f"Live Photo {idx}"
-                    new_md_content += f"[{label}](原创微博Live Photo视频/{file_name})\n\n"
-
-                for image_filename in remaining_images:
-                    new_md_content += f"![img](img/{image_filename})\n\n"
+                new_md_content += self._render_media_items(
+                    remaining_images, "img/", live_photo_files,
+                    "原创微博Live Photo视频/", "Live Photo", blockquote=False
+                )
 
                 # 转发部分
                 retweet = w["retweet"]
@@ -3324,12 +3377,10 @@ class Weibo(object):
                 retweet_live_photo_files = self.get_download_file_names(
                     "live_photo", retweet.get("live_photo_url", ""), retweet
                 )
-                for idx, file_name in enumerate(retweet_live_photo_files, start=1):
-                    label = "转发Live Photo" if len(retweet_live_photo_files) == 1 else f"转发Live Photo {idx}"
-                    new_md_content += f"> [{label}](转发微博Live Photo视频/{file_name})\n\n"
-
-                for image_filename in remaining_retweet_images:
-                    new_md_content += f"> ![img](img/{image_filename})\n\n"
+                new_md_content += self._render_media_items(
+                    remaining_retweet_images, "img/", retweet_live_photo_files,
+                    "转发微博Live Photo视频/", "转发Live Photo", blockquote=True
+                )
             else:
                 # 原创微博
                 text = w.get("text", "").strip()
@@ -3355,12 +3406,10 @@ class Weibo(object):
                 live_photo_files = self.get_download_file_names(
                     "live_photo", w.get("live_photo_url", ""), w
                 )
-                for idx, file_name in enumerate(live_photo_files, start=1):
-                    label = "Live Photo" if len(live_photo_files) == 1 else f"Live Photo {idx}"
-                    new_md_content += f"[{label}](原创微博Live Photo视频/{file_name})\n\n"
-
-                for image_filename in remaining_images:
-                    new_md_content += f"![img](img/{image_filename})\n\n"
+                new_md_content += self._render_media_items(
+                    remaining_images, "img/", live_photo_files,
+                    "原创微博Live Photo视频/", "Live Photo", blockquote=False
+                )
 
             # 添加分隔线
             new_md_content += "---\n\n"
