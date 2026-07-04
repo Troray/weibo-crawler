@@ -90,6 +90,20 @@ class Weibo(object):
         ]  # 结果信息保存类型，为list形式，可包含csv、mongo和mysql三种类型
         self.markdown_split_by = config.get("markdown_split_by", "day") # markdown文件分割方式，day/day_by_month/month/year/all
         self.markdown_image_order = config.get("markdown_image_order", "live_photo_first") # markdown中图片与Live Photo的排列顺序，live_photo_first/image_first_interleaved
+        # markdown 媒体预览配置，默认值
+        default_preview = {
+            "link_preview": 0,
+            "original_video_preview": 0,
+            "retweet_video_preview": 0,
+            "original_image_preview": 1,
+            "retweet_image_preview": 1,
+            "original_live_photo_preview": 0,
+            "retweet_live_photo_preview": 0,
+            "inline_image_preview": 1,
+        }
+        md_preview = config.get("markdown_preview", {})
+        # 合并用户配置，缺失的 key 使用默认值
+        self.markdown_preview = {**default_preview, **md_preview} if isinstance(md_preview, dict) else default_preview
         self.original_pic_download = config[
             "original_pic_download"
         ]  # 取值范围为0、1, 0代表不下载原创微博图片,1代表下载
@@ -498,6 +512,23 @@ class Weibo(object):
         if markdown_image_order not in ["live_photo_first", "image_first_interleaved"]:
             logger.warning("markdown_image_order值应为live_photo_first或image_first_interleaved,请重新输入")
             sys.exit()
+
+        # 验证markdown_preview
+        md_preview = config.get("markdown_preview", {})
+        if isinstance(md_preview, dict):
+            valid_preview_keys = [
+                "link_preview", "original_video_preview", "retweet_video_preview",
+                "original_image_preview", "retweet_image_preview",
+                "original_live_photo_preview", "retweet_live_photo_preview",
+                "inline_image_preview",
+            ]
+            for key in md_preview:
+                if key not in valid_preview_keys:
+                    logger.warning("markdown_preview中存在无效键: %s, 有效键为: %s", key, ", ".join(valid_preview_keys))
+                    sys.exit()
+                if md_preview[key] not in (0, 1):
+                    logger.warning("markdown_preview.%s 值应为0或1,请重新输入", key)
+                    sys.exit()
 
         # 验证user_id_list
         user_id_list = config["user_id_list"]
@@ -3156,9 +3187,15 @@ class Weibo(object):
             replacement = line
 
             if stripped == "网页链接" and remaining_links:
-                replacement = f"[网页链接]({remaining_links.pop(0)})"
+                if self.markdown_preview.get("link_preview", 0):
+                    replacement = f"![网页链接]({remaining_links.pop(0)})"
+                else:
+                    replacement = f"[网页链接]({remaining_links.pop(0)})"
             elif stripped == "查看图片" and remaining_images:
-                replacement = f"![{stripped}](img/{remaining_images.pop(0)})"
+                if self.markdown_preview.get("inline_image_preview", 1):
+                    replacement = f"![{stripped}](img/{remaining_images.pop(0)})"
+                else:
+                    replacement = f"[{stripped}](img/{remaining_images.pop(0)})"
 
             rendered_lines.append(replacement)
 
@@ -3186,14 +3223,30 @@ class Weibo(object):
 
         return "\n".join(quoted_lines)
 
-    def _render_media_items(self, image_filenames, image_prefix, live_photo_files,
-                            live_photo_prefix, live_photo_label_prefix, blockquote=False):
+    def _render_media_items(self, image_filenames, live_photo_files,
+                            live_photo_prefix, live_photo_label_prefix,
+                            blockquote=False, image_preview=True, live_photo_preview=False):
         """根据 markdown_image_order 配置渲染图片和 Live Photo 的 Markdown 内容
 
         live_photo_first: Live Photo 全部放前面，图片放后面（现有模式）
         image_first_interleaved: 图片优先，同名 Live Photo 插入到对应图片下方
+
+        image_preview / live_photo_preview: 控制是否使用 ! 语法实现直接预览
         """
         quote = "> " if blockquote else ""
+
+        def _img_link(filename):
+            if image_preview:
+                return f"{quote}![img](img/{filename})\n"
+            else:
+                return f"{quote}[img](img/{filename})\n"
+
+        def _lp_link(label, filename):
+            if live_photo_preview:
+                return f"{quote}![{label}]({live_photo_prefix}{filename})\n"
+            else:
+                return f"{quote}[{label}]({live_photo_prefix}{filename})\n"
+
         lines = []
 
         if self.markdown_image_order == "image_first_interleaved":
@@ -3209,12 +3262,12 @@ class Weibo(object):
             # 先输出图片，每张图片后紧跟同名 Live Photo
             remaining_lp_stems = set(lp_map.keys())
             for img_filename in image_filenames:
-                lines.append(f"{quote}![img](img/{img_filename})\n")
+                lines.append(_img_link(img_filename))
                 img_stem = os.path.splitext(img_filename)[0]
                 if img_stem in lp_map:
                     label, lp_filename = lp_map[img_stem]
                     # Live Photo 紧跟同名图片，不加空行
-                    lines.append(f"{quote}[{label}]({live_photo_prefix}{lp_filename})\n")
+                    lines.append(_lp_link(label, lp_filename))
                     remaining_lp_stems.discard(img_stem)
                 # 每条图片（及其可能跟随的 Live Photo）之后加一个空行
                 lines.append("\n")
@@ -3222,15 +3275,15 @@ class Weibo(object):
             # 输出未能匹配到任何图片的 Live Photo（异常情况兜底）
             for stem in remaining_lp_stems:
                 label, lp_filename = lp_map[stem]
-                lines.append(f"{quote}[{label}]({live_photo_prefix}{lp_filename})\n\n")
+                lines.append(_lp_link(label, lp_filename) + "\n")
         else:
             # live_photo_first: Live Photo 全部在前，图片在后（现有默认模式）
             for i, file_name in enumerate(live_photo_files):
                 label = (live_photo_label_prefix if len(live_photo_files) == 1
                          else f"{live_photo_label_prefix} {i + 1}")
-                lines.append(f"{quote}[{label}]({live_photo_prefix}{file_name})\n\n")
+                lines.append(_lp_link(label, file_name) + "\n")
             for img_filename in image_filenames:
-                lines.append(f"{quote}![img](img/{img_filename})\n\n")
+                lines.append(_img_link(img_filename) + "\n")
 
         return "".join(lines)
 
@@ -3330,21 +3383,33 @@ class Weibo(object):
                     new_md_content += f"{rendered_text}\n\n"
 
                 for link in remaining_links:
-                    new_md_content += f"[网页链接]({link})\n\n"
+                    if self.markdown_preview.get("link_preview", 0):
+                        new_md_content += f"![网页链接]({link})\n\n"
+                    else:
+                        new_md_content += f"[网页链接]({link})\n\n"
 
+                video_preview = self.markdown_preview.get("original_video_preview", 0)
                 video_files = self.get_download_file_names(
                     "video", w.get("video_url", ""), w
                 )
                 for idx, file_name in enumerate(video_files, start=1):
                     label = "视频" if len(video_files) == 1 else f"视频 {idx}"
-                    new_md_content += f"[{label}](原创微博视频/{file_name})\n\n"
+                    if video_preview:
+                        new_md_content += f"![{label}](原创微博视频/{file_name})\n\n"
+                    else:
+                        new_md_content += f"[{label}](原创微博视频/{file_name})\n\n"
 
+                live_photo_preview = self.markdown_preview.get("original_live_photo_preview", 0)
                 live_photo_files = self.get_download_file_names(
                     "live_photo", w.get("live_photo_url", ""), w
                 )
+                image_preview = self.markdown_preview.get("original_image_preview", 1)
                 new_md_content += self._render_media_items(
-                    remaining_images, "img/", live_photo_files,
-                    "原创微博Live Photo视频/", "Live Photo", blockquote=False
+                    remaining_images, live_photo_files,
+                    "原创微博Live Photo视频/", "Live Photo",
+                    blockquote=False,
+                    image_preview=image_preview,
+                    live_photo_preview=live_photo_preview,
                 )
 
                 # 转发部分
@@ -3365,21 +3430,33 @@ class Weibo(object):
                     new_md_content += f"{quoted_retweet}\n\n"
 
                 for link in remaining_retweet_links:
-                    new_md_content += f"> [网页链接]({link})\n\n"
+                    if self.markdown_preview.get("link_preview", 0):
+                        new_md_content += f"> ![网页链接]({link})\n\n"
+                    else:
+                        new_md_content += f"> [网页链接]({link})\n\n"
 
+                retweet_video_preview = self.markdown_preview.get("retweet_video_preview", 0)
                 retweet_video_files = self.get_download_file_names(
                     "video", retweet.get("video_url", ""), retweet
                 )
                 for idx, file_name in enumerate(retweet_video_files, start=1):
                     label = "转发视频" if len(retweet_video_files) == 1 else f"转发视频 {idx}"
-                    new_md_content += f"> [{label}](转发微博视频/{file_name})\n\n"
+                    if retweet_video_preview:
+                        new_md_content += f"> ![{label}](转发微博视频/{file_name})\n\n"
+                    else:
+                        new_md_content += f"> [{label}](转发微博视频/{file_name})\n\n"
 
+                retweet_live_photo_preview = self.markdown_preview.get("retweet_live_photo_preview", 0)
                 retweet_live_photo_files = self.get_download_file_names(
                     "live_photo", retweet.get("live_photo_url", ""), retweet
                 )
+                retweet_image_preview = self.markdown_preview.get("retweet_image_preview", 1)
                 new_md_content += self._render_media_items(
-                    remaining_retweet_images, "img/", retweet_live_photo_files,
-                    "转发微博Live Photo视频/", "转发Live Photo", blockquote=True
+                    remaining_retweet_images, retweet_live_photo_files,
+                    "转发微博Live Photo视频/", "转发Live Photo",
+                    blockquote=True,
+                    image_preview=retweet_image_preview,
+                    live_photo_preview=retweet_live_photo_preview,
                 )
             else:
                 # 原创微博
@@ -3394,21 +3471,33 @@ class Weibo(object):
                     new_md_content += f"{rendered_text}\n\n"
 
                 for link in remaining_links:
-                    new_md_content += f"[网页链接]({link})\n\n"
+                    if self.markdown_preview.get("link_preview", 0):
+                        new_md_content += f"![网页链接]({link})\n\n"
+                    else:
+                        new_md_content += f"[网页链接]({link})\n\n"
 
+                video_preview = self.markdown_preview.get("original_video_preview", 0)
                 video_files = self.get_download_file_names(
                     "video", w.get("video_url", ""), w
                 )
                 for idx, file_name in enumerate(video_files, start=1):
                     label = "视频" if len(video_files) == 1 else f"视频 {idx}"
-                    new_md_content += f"[{label}](原创微博视频/{file_name})\n\n"
+                    if video_preview:
+                        new_md_content += f"![{label}](原创微博视频/{file_name})\n\n"
+                    else:
+                        new_md_content += f"[{label}](原创微博视频/{file_name})\n\n"
 
+                live_photo_preview = self.markdown_preview.get("original_live_photo_preview", 0)
                 live_photo_files = self.get_download_file_names(
                     "live_photo", w.get("live_photo_url", ""), w
                 )
+                image_preview = self.markdown_preview.get("original_image_preview", 1)
                 new_md_content += self._render_media_items(
-                    remaining_images, "img/", live_photo_files,
-                    "原创微博Live Photo视频/", "Live Photo", blockquote=False
+                    remaining_images, live_photo_files,
+                    "原创微博Live Photo视频/", "Live Photo",
+                    blockquote=False,
+                    image_preview=image_preview,
+                    live_photo_preview=live_photo_preview,
                 )
 
             # 添加分隔线

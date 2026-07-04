@@ -12,6 +12,16 @@
     ], // 输出格式（可多选），可选项：csv, json, mysql, mongo, sqlite, post, markdown，示例：["markdown"] 或 ["markdown", "csv", "json"]
     "markdown_split_by": "day_by_month", // markdown文件分割方式，可选项：day（按天，平铺），day_by_month（按天，按月归档到子文件夹），month（按月），year（按年），all（所有数据在一个文件）
     "markdown_image_order": "live_photo_first", // markdown中图片与Live Photo的排列顺序，可选项：live_photo_first（Live Photo排在图片前面），image_first_interleaved（图片优先，同名Live Photo插入到对应图片下方）
+    "markdown_preview": {
+        "link_preview": 0, // 网页链接是否预览（!语法） 0 = 普通链接 [text](url)，1 = 预览图片 ![](url)
+        "original_video_preview": 0, // 原创微博视频是否预览 0 = 普通链接，1 = 预览
+        "retweet_video_preview": 0, // 转发微博视频是否预览 0 = 普通链接，1 = 预览
+        "original_image_preview": 1, // 原创微博图片是否预览 0 = 普通链接，1 = 预览
+        "retweet_image_preview": 1, // 转发微博图片是否预览 0 = 普通链接，1 = 预览
+        "original_live_photo_preview": 0, // 原创微博Live Photo是否预览 0 = 普通链接，1 = 预览
+        "retweet_live_photo_preview": 0, // 转发微博Live Photo是否预览 0 = 普通链接，1 = 预览
+        "inline_image_preview": 1 // 正文中"查看图片"是否预览 0 = 普通链接，1 = 预览
+    },
     "original_pic_download": 0, // 是否下载原创微博图片 0 = 不下载，1 = 下载
     "retweet_pic_download": 0, // 是否下载转发微博图片 0 = 不下载，1 = 下载
     "original_video_download": 0, // 是否下载原创微博视频 0 = 不下载，1 = 下载
